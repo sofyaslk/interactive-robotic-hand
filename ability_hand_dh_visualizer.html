@@ -1,0 +1,317 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+canvas{display:block;width:100%;cursor:grab}
+canvas:active{cursor:grabbing}
+.layout{display:grid;grid-template-columns:1fr 220px;gap:0;align-items:start}
+.left{padding:0}
+.right{padding:8px 0 8px 12px;border-left:0.5px solid var(--color-border-tertiary)}
+.sec{font-size:11px;font-weight:500;color:var(--color-text-secondary);letter-spacing:.06em;text-transform:uppercase;margin:10px 0 6px}
+.srow{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.srow label{font-size:11px;color:var(--color-text-secondary);min-width:72px}
+.srow input[type=range]{flex:1;height:3px}
+.srow span{font-size:11px;color:var(--color-text-primary);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.dhtbl{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
+.dhtbl th{font-size:9px;font-weight:500;color:var(--color-text-secondary);padding:2px 4px;text-align:left;border-bottom:0.5px solid var(--color-border-tertiary)}
+.dhtbl td{padding:2px 4px;color:var(--color-text-primary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dhtbl tr:nth-child(even) td{background:var(--color-background-secondary)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:4px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin:6px 0}
+.litem{font-size:10px;color:var(--color-text-secondary);display:flex;align-items:center;gap:3px}
+</style>
+
+<h2 class="sr-only">Ability Hand DH parameter visualizer with interactive 3D hand and live DH table</h2>
+
+<div class="layout">
+<div class="left">
+<canvas id="cv" height="440"></canvas>
+<div class="legend" style="padding:4px 0 0">
+  <span class="litem"><span class="dot" style="background:#378ADD"></span>Index</span>
+  <span class="litem"><span class="dot" style="background:#1D9E75"></span>Middle</span>
+  <span class="litem"><span class="dot" style="background:#D85A30"></span>Ring</span>
+  <span class="litem"><span class="dot" style="background:#7F77DD"></span>Pinky</span>
+  <span class="litem"><span class="dot" style="background:#BA7517"></span>Thumb</span>
+  <span class="litem"><svg width="18" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#E24B4A" stroke-width="1.5"/></svg>X</span>
+  <span class="litem"><svg width="18" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#1D9E75" stroke-width="1.5"/></svg>Y</span>
+  <span class="litem"><svg width="18" height="8"><line x1="0" y1="4" x2="18" y2="4" stroke="#378ADD" stroke-width="1.5"/></svg>Z</span>
+  <span class="litem" style="color:var(--color-text-tertiary);font-size:9px">drag to rotate</span>
+</div>
+</div>
+<div class="right">
+  <div class="sec">joint angles (rad)</div>
+  <div id="sliders"></div>
+  <div class="sec" style="margin-top:12px">DH parameters</div>
+  <table class="dhtbl" id="dhtbl">
+    <thead><tr><th>Link</th><th>θ</th><th>d</th><th>a (m)</th><th>α</th></tr></thead>
+    <tbody id="dhtbody"></tbody>
+  </table>
+</div>
+</div>
+
+<script>
+const PI=Math.PI,cos=Math.cos,sin=Math.sin,atan2=Math.atan2,sqrt=Math.sqrt;
+
+function mulQ(a,b){return[a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]];}
+function qToR(q){const[w,x,y,z]=q;return[[1-2*(y*y+z*z),2*(x*y-w*z),2*(x*z+w*y)],[2*(x*y+w*z),1-2*(x*x+z*z),2*(y*z-w*x)],[2*(x*z-w*y),2*(y*z+w*x),1-2*(x*x+y*y)]];}
+function makeT(pos,q){const R=qToR(q);return[[R[0][0],R[0][1],R[0][2],pos[0]],[R[1][0],R[1][1],R[1][2],pos[1]],[R[2][0],R[2][1],R[2][2],pos[2]],[0,0,0,1]];}
+function mulT(A,B){const C=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,1]];for(let i=0;i<3;i++)for(let j=0;j<4;j++){C[i][j]=0;for(let k=0;k<4;k++)C[i][j]+=A[i][k]*B[k][j];}return C;}
+function applyT(T,p){return[T[0][0]*p[0]+T[0][1]*p[1]+T[0][2]*p[2]+T[0][3],T[1][0]*p[0]+T[1][1]*p[1]+T[1][2]*p[2]+T[1][3],T[2][0]*p[0]+T[2][1]*p[1]+T[2][2]*p[2]+T[2][3]];}
+function dhMat(th,d,a,al){const ct=cos(th),st=sin(th),ca=cos(al),sa=sin(al);return[[ct,-st*ca,st*sa,a*ct],[st,ct*ca,-ct*sa,a*st],[0,sa,ca,d],[0,0,0,1]];}
+function alphaFromQ(q){const R=qToR(q);return atan2(R[2][1],R[2][2]);}
+
+const FCONF={
+  index:{col:'#378ADD',label:'Index',
+    mountPos:[-0.0279216,-0.00927034,0.0958706],mountQ:[0.685906,0.0469401,-0.714459,-0.129917],
+    distPos:[0.0384727,0.0032577,0],distQ:[0.999108,0,0,0.0422244],
+    a1:0.0384727,a2:0.045,j1:'idx_mcp',j2:'idx_pip'},
+  middle:{col:'#1D9E75',label:'Middle',
+    mountPos:[-0.00841718,-0.0115172,0.0990634],mountQ:[0.704562,0.0715738,-0.698395,-0.103508],
+    distPos:[0.0384727,0.0032577,0],distQ:[0.999108,0,0,0.0422244],
+    a1:0.0384727,a2:0.045,j1:'mid_mcp',j2:'mid_pip'},
+  ring:{col:'#D85A30',label:'Ring',
+    mountPos:[0.0117529,-0.0103946,0.0967038],mountQ:[0.721351,0.0986547,-0.681173,-0.0769649],
+    distPos:[0.0384727,0.0032577,0],distQ:[0.999108,0,0,0.0422244],
+    a1:0.0384727,a2:0.045,j1:'rng_mcp',j2:'rng_pip'},
+  pinky:{col:'#7F77DD',label:'Pinky',
+    mountPos:[0.0308633,-0.00716283,0.0907346],mountQ:[0.719226,0.122363,-0.681748,-0.0544096],
+    distPos:[0.0384727,0.0032577,0],distQ:[0.999108,0,0,0.0422244],
+    a1:0.0384727,a2:0.035,j1:'pnk_mcp',j2:'pnk_pip'},
+  thumb:{col:'#BA7517',label:'Thumb',
+    mountPos:[-0.0240477,0.00378125,0.0323296],mountQ:[-0.0947972,0.0440301,-0.00419696,0.994514],
+    distPos:[0.0278284,0,0.0147507],distQ:[0.608761,0.793353,0,0],
+    a1:0.0278284,a2:0.055,j1:'th_cmc',j2:'th_mcp'},
+};
+
+const JMETA={
+  idx_mcp:{label:'Index MCP',min:0,max:1.74,def:0.4,finger:'index',link:1},
+  idx_pip:{label:'Index PIP',min:0.766,max:2.61,def:1.2,finger:'index',link:2},
+  mid_mcp:{label:'Middle MCP',min:0,max:1.74,def:0.4,finger:'middle',link:1},
+  mid_pip:{label:'Middle PIP',min:0.766,max:2.61,def:1.2,finger:'middle',link:2},
+  rng_mcp:{label:'Ring MCP',min:0,max:1.74,def:0.4,finger:'ring',link:1},
+  rng_pip:{label:'Ring PIP',min:0.766,max:2.61,def:1.2,finger:'ring',link:2},
+  pnk_mcp:{label:'Pinky MCP',min:0,max:1.74,def:0.3,finger:'pinky',link:1},
+  pnk_pip:{label:'Pinky PIP',min:0.766,max:2.61,def:1.0,finger:'pinky',link:2},
+  th_cmc:{label:'Thumb CMC',min:-2.09,max:0,def:-0.5,finger:'thumb',link:1},
+  th_mcp:{label:'Thumb MCP',min:0,max:1.91,def:0.8,finger:'thumb',link:2},
+};
+
+const angles={};
+Object.entries(JMETA).forEach(([k,v])=>angles[k]=v.def);
+
+const slDiv=document.getElementById('sliders');
+const slSpans={};
+Object.entries(JMETA).forEach(([k,m])=>{
+  const row=document.createElement('div');row.className='srow';
+  const lbl=document.createElement('label');lbl.textContent=m.label;
+  const sl=document.createElement('input');sl.type='range';sl.min=m.min;sl.max=m.max;sl.step=0.01;sl.value=m.def;
+  const sp=document.createElement('span');sp.textContent=m.def.toFixed(2);sp.id='sp_'+k;
+  sl.oninput=()=>{angles[k]=parseFloat(sl.value);sp.textContent=parseFloat(sl.value).toFixed(2);draw();};
+  row.append(lbl,sl,sp);slDiv.appendChild(row);
+  slSpans[k]=sp;
+});
+
+function computeChain(fname){
+  const f=FCONF[fname];
+  const alpha1=alphaFromQ(f.distQ);
+  const T0=makeT(f.mountPos,f.mountQ);
+  const T1=dhMat(angles[f.j1],0,f.a1,alpha1);
+  const T2=dhMat(angles[f.j2],0,f.a2,0);
+  const Tmcp=mulT(T0,T1);
+  const Ttip=mulT(Tmcp,T2);
+  const palmP=[0,0,0];
+  const proxP=applyT(T0,[0,0,0]);
+  const mcpP= applyT(Tmcp,[0,0,0]);
+  const tipP= applyT(Ttip,[0,0,0]);
+  const tipX= applyT(Ttip,[0.018,0,0]);
+  const tipY= applyT(Ttip,[0,0.018,0]);
+  const tipZ= applyT(Ttip,[0,0,0.018]);
+  const alpha1val=alpha1;
+  return{palmP,proxP,mcpP,tipP,tipX,tipY,tipZ,alpha1:alpha1val,T0,Tmcp,Ttip,f};
+}
+
+function updateTable(){
+  const tbody=document.getElementById('dhtbody');
+  tbody.innerHTML='';
+  Object.entries(FCONF).forEach(([fname,f])=>{
+    const alpha1=alphaFromQ(f.distQ);
+    const rows=[
+      {link:f.label+' MCP',th:angles[f.j1].toFixed(3),d:'0',a:f.a1.toFixed(4),al:alpha1.toFixed(3)},
+      {link:f.label+' PIP',th:angles[f.j2].toFixed(3),d:'0',a:f.a2.toFixed(4),al:'0'},
+    ];
+    rows.forEach((r,i)=>{
+      const tr=document.createElement('tr');
+      [r.link,r.th,r.d,r.a,r.al].forEach((v,ci)=>{
+        const td=document.createElement('td');
+        if(ci===0){const dot=document.createElement('span');dot.className='dot';dot.style.background=f.col;td.appendChild(dot);}
+        td.appendChild(document.createTextNode(ci===0&&i===1?'  └ '+r.link.replace(f.label+' ',''):v));
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  });
+}
+
+const cv=document.getElementById('cv');
+const ctx=cv.getContext('2d');
+let camAz=0.55,camEl=0.28,drag=false,lx=0,ly=0;
+
+cv.addEventListener('mousedown',e=>{drag=true;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mouseup',()=>drag=false);
+window.addEventListener('mousemove',e=>{
+  if(!drag)return;
+  camAz-=(e.clientX-lx)*0.008;
+  camEl=Math.max(-1.1,Math.min(1.1,camEl+(e.clientY-ly)*0.007));
+  lx=e.clientX;ly=e.clientY;draw();
+});
+cv.addEventListener('touchstart',e=>{drag=true;lx=e.touches[0].clientX;ly=e.touches[0].clientY;},{passive:true});
+cv.addEventListener('touchend',()=>drag=false);
+cv.addEventListener('touchmove',e=>{
+  if(!drag)return;
+  camAz-=(e.touches[0].clientX-lx)*0.008;
+  camEl=Math.max(-1.1,Math.min(1.1,camEl+(e.touches[0].clientY-ly)*0.007));
+  lx=e.touches[0].clientX;ly=e.touches[0].clientY;draw();
+},{passive:true});
+
+function proj(p,W,H,sc){
+  const caz=cos(camAz),saz=sin(camAz),cel=cos(camEl),sel=sin(camEl);
+  const rx=caz*p[0]+saz*p[2];
+  const ry_rot=-saz*p[0]+caz*p[2];
+  const ry=sel*p[1]+cel*ry_rot;
+  const rz=cel*p[1]-sel*ry_rot;
+  return[W/2+rx*sc, H*0.55-ry*sc, rz];
+}
+
+function line3d(ctx,A,B,W,H,sc,col,lw,dash){
+  const a=proj(A,W,H,sc),b=proj(B,W,H,sc);
+  ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);
+  ctx.strokeStyle=col;ctx.lineWidth=lw;
+  ctx.setLineDash(dash||[]);ctx.stroke();ctx.setLineDash([]);
+}
+
+function circle3d(ctx,P,W,H,sc,col,r){
+  const p=proj(P,W,H,sc);
+  ctx.beginPath();ctx.arc(p[0],p[1],r,0,PI*2);ctx.fillStyle=col;ctx.fill();
+}
+
+function drawAxisArrow(ctx,origin,tip,W,H,sc,col){
+  const o=proj(origin,W,H,sc),t=proj(tip,W,H,sc);
+  ctx.beginPath();ctx.moveTo(o[0],o[1]);ctx.lineTo(t[0],t[1]);
+  ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.stroke();
+  const dx=t[0]-o[0],dy=t[1]-o[1],len=sqrt(dx*dx+dy*dy)||1;
+  const ux=dx/len,uy=dy/len;
+  ctx.beginPath();ctx.moveTo(t[0],t[1]);
+  ctx.lineTo(t[0]-ux*5+uy*3,t[1]-uy*5-ux*3);
+  ctx.lineTo(t[0]-ux*5-uy*3,t[1]-uy*5+ux*3);
+  ctx.closePath();ctx.fillStyle=col;ctx.fill();
+}
+
+function drawPalm(ctx,W,H,sc){
+  const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const palmPts=[
+    [-0.035,-0.005,0.03],[ 0.04,-0.005,0.03],
+    [ 0.05,-0.005,0.11],[-0.04,-0.005,0.11]
+  ];
+  const pp=palmPts.map(p=>proj(p,W,H,sc));
+  ctx.beginPath();pp.forEach((p,i)=>i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]));
+  ctx.closePath();
+  ctx.fillStyle=dark?'rgba(255,255,255,0.06)':'rgba(0,0,0,0.05)';
+  ctx.strokeStyle=dark?'rgba(255,255,255,0.2)':'rgba(0,0,0,0.18)';
+  ctx.lineWidth=1;ctx.fill();ctx.stroke();
+
+  const wristPts=[[-0.025,-0.005,-0.01],[0.03,-0.005,-0.01],[0.03,-0.005,0.03],[-0.035,-0.005,0.03]];
+  const wp=wristPts.map(p=>proj(p,W,H,sc));
+  ctx.beginPath();wp.forEach((p,i)=>i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]));
+  ctx.closePath();
+  ctx.fillStyle=dark?'rgba(255,255,255,0.04)':'rgba(0,0,0,0.04)';
+  ctx.strokeStyle=dark?'rgba(255,255,255,0.15)':'rgba(0,0,0,0.12)';
+  ctx.fill();ctx.stroke();
+}
+
+function drawGrid(ctx,W,H,sc){
+  const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const gc=dark?'rgba(255,255,255,0.06)':'rgba(0,0,0,0.06)';
+  for(let i=-4;i<=4;i++){
+    line3d(ctx,[i*0.02,-0.012,-0.04],[i*0.02,-0.012,0.14],W,H,sc,gc,0.5);
+    line3d(ctx,[-0.08,-0.012,i*0.02],[0.08,-0.012,i*0.02],W,H,sc,gc,0.5);
+  }
+}
+
+function drawWorldFrame(ctx,W,H,sc){
+  const O=[0,-0.005,0];
+  drawAxisArrow(ctx,O,[0.03,-0.005,0],W,H,sc,'#E24B4A');
+  drawAxisArrow(ctx,O,[0,0.025,0],W,H,sc,'#1D9E75');
+  drawAxisArrow(ctx,O,[0,-0.005,0.03],W,H,sc,'#378ADD');
+  const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const lc=dark?'rgba(255,255,255,0.6)':'rgba(0,0,0,0.6)';
+  const labels=[{p:[0.033,-0.005,0],t:'X',c:'#E24B4A'},{p:[0,0.028,0],t:'Y',c:'#1D9E75'},{p:[0,-0.005,0.033],t:'Z',c:'#378ADD'}];
+  labels.forEach(({p,t,c})=>{
+    const pp=proj(p,W,H,sc);
+    ctx.fillStyle=c;ctx.font='bold 10px sans-serif';ctx.textAlign='center';ctx.fillText(t,pp[0],pp[1]);
+  });
+  circle3d(ctx,O,W,H,sc,lc,3);
+}
+
+function drawDHAnnotation(ctx,chain,W,H,sc){
+  const{palmP,proxP,mcpP,tipP,f}=chain;
+  const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+
+  const mid_prox=[(palmP[0]+proxP[0])/2,(palmP[1]+proxP[1])/2-0.005,(palmP[2]+proxP[2])/2];
+  const mid_prox_p=proj(mid_prox,W,H,sc);
+
+  const mid_link1=[(proxP[0]+mcpP[0])/2,(proxP[1]+mcpP[1])/2-0.004,(proxP[2]+mcpP[2])/2];
+  const ml1p=proj(mid_link1,W,H,sc);
+
+  const mid_link2=[(mcpP[0]+tipP[0])/2,(mcpP[1]+tipP[1])/2-0.004,(mcpP[2]+tipP[2])/2];
+  const ml2p=proj(mid_link2,W,H,sc);
+
+  ctx.font='9px sans-serif';ctx.textAlign='center';
+  ctx.fillStyle=f.col;
+  ctx.globalAlpha=0.7;
+  ctx.fillText('a='+f.a1.toFixed(3),ml1p[0],ml1p[1]);
+  ctx.fillText('a='+f.a2.toFixed(3),ml2p[0],ml2p[1]);
+  ctx.globalAlpha=1;
+}
+
+function draw(){
+  const dpr=window.devicePixelRatio||1;
+  const W=cv.offsetWidth,H=440;
+  cv.width=W*dpr;cv.height=H*dpr;cv.style.height=H+'px';
+  ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
+  const sc=820;
+
+  drawGrid(ctx,W,H,sc);
+  drawPalm(ctx,W,H,sc);
+  drawWorldFrame(ctx,W,H,sc);
+
+  const chains=Object.keys(FCONF).map(k=>({name:k,...computeChain(k)}));
+
+  chains.sort((a,b)=>{
+    const pa=proj(a.tipP,W,H,sc),pb=proj(b.tipP,W,H,sc);
+    return pb[2]-pa[2];
+  });
+
+  chains.forEach(chain=>{
+    const{palmP,proxP,mcpP,tipP,tipX,tipY,tipZ,f}=chain;
+
+    line3d(ctx,palmP,proxP,W,H,sc,f.col+'40',1.5,[3,3]);
+    line3d(ctx,proxP,mcpP,W,H,sc,f.col,3);
+    line3d(ctx,mcpP,tipP,W,H,sc,f.col,3);
+
+    circle3d(ctx,proxP,W,H,sc,f.col,4);
+    circle3d(ctx,mcpP,W,H,sc,'#ffffff',5);
+    circle3d(ctx,mcpP,W,H,sc,f.col,3.5);
+
+    drawAxisArrow(ctx,tipP,tipX,W,H,sc,'#E24B4A');
+    drawAxisArrow(ctx,tipP,tipY,W,H,sc,'#1D9E75');
+    drawAxisArrow(ctx,tipP,tipZ,W,H,sc,'#378ADD');
+
+    circle3d(ctx,tipP,W,H,sc,'#ffffff',6);
+    circle3d(ctx,tipP,W,H,sc,f.col,4.5);
+  });
+
+  updateTable();
+}
+
+window.addEventListener('resize',draw);
+draw();
+</script>
