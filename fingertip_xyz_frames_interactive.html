@@ -1,0 +1,364 @@
+
+<style>
+canvas { display:block; width:100%; }
+.ctrl { display:flex; align-items:center; gap:10px; font-size:13px; color:var(--color-text-secondary); margin-bottom:6px; }
+.ctrl label { min-width:90px; }
+.ctrl input[type=range] { flex:1; }
+.ctrl span { min-width:40px; text-align:right; font-size:13px; color:var(--color-text-primary); }
+.row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px 24px; margin-bottom:12px; }
+.finger-btns { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:14px; }
+.fbtn { font-size:12px; padding:4px 10px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-secondary); background:var(--color-background-secondary); color:var(--color-text-secondary); cursor:pointer; transition:all .15s; }
+.fbtn.active { border-color:#378ADD; background:#E6F1FB; color:#0C447C; }
+</style>
+
+<h2 class="sr-only">Interactive fingertip XYZ axis frames for the Ability Hand</h2>
+
+<div class="finger-btns" id="fbtns"></div>
+
+<div class="row2" id="sliders"></div>
+
+<canvas id="cv" height="460"></canvas>
+
+<script>
+const PI = Math.PI;
+
+function mulQ(a,b){
+  return [
+    a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],
+    a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
+    a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],
+    a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]
+  ];
+}
+function qRotZ(theta){
+  const h=theta/2;
+  return [Math.cos(h),0,0,Math.sin(h)];
+}
+function qToMat(q){
+  const [w,x,y,z]=q;
+  return [
+    1-2*(y*y+z*z), 2*(x*y-w*z),   2*(x*z+w*y),
+    2*(x*y+w*z),   1-2*(x*x+z*z), 2*(y*z-w*x),
+    2*(x*z-w*y),   2*(y*z+w*x),   1-2*(x*x+y*y)
+  ];
+}
+function applyR(R,v){
+  return [
+    R[0]*v[0]+R[1]*v[1]+R[2]*v[2],
+    R[3]*v[0]+R[4]*v[1]+R[5]*v[2],
+    R[6]*v[0]+R[7]*v[1]+R[8]*v[2]
+  ];
+}
+function addV(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
+
+const FINGERS = {
+  index:{
+    label:'Index', color:'#378ADD',
+    prox_pos:[-0.0279216,-0.00927034,0.0958706],
+    prox_q:[0.685906,0.0469401,-0.714459,-0.129917],
+    dist_pos:[0.0384727,0.0032577,0.0],
+    dist_q:[0.999108,0.0,0.0,0.0422244],
+    j1:'index_mcp', j2:'index_pip',
+    tip_off:[0.045,0,0]
+  },
+  middle:{
+    label:'Middle', color:'#1D9E75',
+    prox_pos:[-0.00841718,-0.0115172,0.0990634],
+    prox_q:[0.704562,0.0715738,-0.698395,-0.103508],
+    dist_pos:[0.0384727,0.0032577,0.0],
+    dist_q:[0.999108,0.0,0.0,0.0422244],
+    j1:'middle_mcp', j2:'middle_pip',
+    tip_off:[0.045,0,0]
+  },
+  ring:{
+    label:'Ring', color:'#D85A30',
+    prox_pos:[0.0117529,-0.0103946,0.0967038],
+    prox_q:[0.721351,0.0986547,-0.681173,-0.0769649],
+    dist_pos:[0.0384727,0.0032577,0.0],
+    dist_q:[0.999108,0.0,0.0,0.0422244],
+    j1:'ring_mcp', j2:'ring_pip',
+    tip_off:[0.045,0,0]
+  },
+  pinky:{
+    label:'Pinky', color:'#7F77DD',
+    prox_pos:[0.0308633,-0.00716283,0.0907346],
+    prox_q:[0.719226,0.122363,-0.681748,-0.0544096],
+    dist_pos:[0.0384727,0.0032577,0.0],
+    dist_q:[0.999108,0.0,0.0,0.0422244],
+    j1:'pinky_mcp', j2:'pinky_pip',
+    tip_off:[0.035,0,0]
+  },
+  thumb:{
+    label:'Thumb', color:'#BA7517',
+    prox_pos:[-0.0240477,0.00378125,0.0323296],
+    prox_q:[-0.0947972,0.0440301,-0.00419696,0.994514],
+    dist_pos:[0.0278284,0.0,0.0147507],
+    dist_q:[0.608761,0.793353,0.0,0.0],
+    j1:'thumb_cmc', j2:'thumb_mcp',
+    tip_off:[0.055,0,0]
+  }
+};
+
+const JOINT_META = {
+  index_mcp:  {label:'Index MCP',  min:0,     max:1.74,  def:0.5},
+  index_pip:  {label:'Index PIP',  min:0.766, max:2.61,  def:1.2},
+  middle_mcp: {label:'Middle MCP', min:0,     max:1.74,  def:0.5},
+  middle_pip: {label:'Middle PIP', min:0.766, max:2.61,  def:1.2},
+  ring_mcp:   {label:'Ring MCP',   min:0,     max:1.74,  def:0.5},
+  ring_pip:   {label:'Ring PIP',   min:0.766, max:2.61,  def:1.2},
+  pinky_mcp:  {label:'Pinky MCP',  min:0,     max:1.74,  def:0.4},
+  pinky_pip:  {label:'Pinky PIP',  min:0.766, max:2.61,  def:1.0},
+  thumb_cmc:  {label:'Thumb CMC',  min:-2.09, max:0,     def:-0.5},
+  thumb_mcp:  {label:'Thumb MCP',  min:0,     max:1.91,  def:0.8}
+};
+
+const angles = {};
+Object.entries(JOINT_META).forEach(([k,v])=> angles[k]=v.def);
+
+let activeFingers = new Set(Object.keys(FINGERS));
+
+function computeTip(fkey){
+  const f = FINGERS[fkey];
+  let pos=[0,0,0], q=[1,0,0,0];
+
+  const Rprox = qToMat(mulQ(q, f.prox_q));
+  pos = addV(pos, applyR(qToMat(q), f.prox_pos));
+  q = mulQ(q, f.prox_q);
+
+  const Rj1 = qRotZ(angles[f.j1]);
+  q = mulQ(q, Rj1);
+
+  pos = addV(pos, applyR(qToMat(q), f.dist_pos));
+  q = mulQ(q, f.dist_q);
+
+  const Rj2 = qRotZ(angles[f.j2]);
+  q = mulQ(q, Rj2);
+
+  pos = addV(pos, applyR(qToMat(q), f.tip_off));
+
+  const R = qToMat(q);
+  const xAxis = [R[0],R[3],R[6]];
+  const yAxis = [R[1],R[4],R[7]];
+  const zAxis = [R[2],R[5],R[8]];
+
+  return {pos, xAxis, yAxis, zAxis, q};
+}
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+let camAz = 0.5, camEl = 0.35;
+let dragging=false, lastMx=0, lastMy=0;
+
+cv.addEventListener('mousedown', e=>{ dragging=true; lastMx=e.clientX; lastMy=e.clientY; });
+window.addEventListener('mouseup',  ()=>dragging=false);
+window.addEventListener('mousemove', e=>{
+  if(!dragging) return;
+  camAz -= (e.clientX-lastMx)*0.008;
+  camEl  = Math.max(-1.2, Math.min(1.2, camEl+(e.clientY-lastMy)*0.006));
+  lastMx=e.clientX; lastMy=e.clientY;
+  draw();
+});
+cv.addEventListener('touchstart', e=>{ dragging=true; lastMx=e.touches[0].clientX; lastMy=e.touches[0].clientY; },{passive:true});
+cv.addEventListener('touchend',   ()=>dragging=false);
+cv.addEventListener('touchmove',  e=>{
+  if(!dragging) return;
+  camAz -= (e.touches[0].clientX-lastMx)*0.008;
+  camEl  = Math.max(-1.2, Math.min(1.2, camEl+(e.touches[0].clientY-lastMy)*0.006));
+  lastMx=e.touches[0].clientX; lastMy=e.touches[0].clientY;
+  draw();
+},{passive:true});
+
+function project(p, W, H, scale){
+  const caz=Math.cos(camAz), saz=Math.sin(camAz);
+  const cel=Math.cos(camEl), sel=Math.sin(camEl);
+  const x = caz*p[0] + saz*p[2];
+  const y_rot = -saz*p[0] + caz*p[2];
+  const y = sel*p[1] + cel*y_rot;
+  const z = cel*p[1] - sel*y_rot;
+  return [W/2 + x*scale, H*0.52 - y*scale, z];
+}
+
+function draw(){
+  const dpr = window.devicePixelRatio||1;
+  const W = cv.offsetWidth, H = 460;
+  cv.width = W*dpr; cv.height = H*dpr;
+  cv.style.height = H+'px';
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+
+  const scale = 900;
+  const ALEN = 0.025;
+
+  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const gridCol  = dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+  const palmCol  = dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.15)';
+  const labelCol = dark ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)';
+
+  const gridPts = [];
+  for(let i=-3;i<=3;i++) for(let j=-3;j<=3;j++)
+    gridPts.push(project([i*0.03, -0.01, j*0.03+0.07], W, H, scale));
+
+  for(let i=0;i<7;i++){
+    ctx.beginPath();
+    for(let j=0;j<7;j++){
+      const p=gridPts[i*7+j];
+      j===0 ? ctx.moveTo(p[0],p[1]) : ctx.lineTo(p[0],p[1]);
+    }
+    ctx.strokeStyle=gridCol; ctx.lineWidth=0.5; ctx.stroke();
+  }
+  for(let j=0;j<7;j++){
+    ctx.beginPath();
+    for(let i=0;i<7;i++){
+      const p=gridPts[i*7+j];
+      i===0 ? ctx.moveTo(p[0],p[1]) : ctx.lineTo(p[0],p[1]);
+    }
+    ctx.strokeStyle=gridCol; ctx.lineWidth=0.5; ctx.stroke();
+  }
+
+  const palmVerts = [
+    [-0.03,-0.005,0.04],[ 0.03,-0.005,0.04],
+    [ 0.04,-0.005,0.12],[-0.04,-0.005,0.12]
+  ].map(v=>project(v,W,H,scale));
+  ctx.beginPath();
+  palmVerts.forEach((p,i)=> i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]));
+  ctx.closePath();
+  ctx.fillStyle = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+  ctx.strokeStyle = palmCol; ctx.lineWidth=0.8;
+  ctx.fill(); ctx.stroke();
+  const palmLp = project([0,-0.005,0.07],W,H,scale);
+  ctx.fillStyle=labelCol; ctx.font='11px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('palm', palmLp[0], palmLp[1]);
+
+  const worldO = project([0,0,0],W,H,scale);
+  const worldX = project([0.03,0,0],W,H,scale);
+  const worldY = project([0,0.03,0],W,H,scale);
+  const worldZ = project([0,0,0.03],W,H,scale);
+  const wAxes = [
+    {p:worldX, col:'#E24B4A', label:'X'},
+    {p:worldY, col:'#639922', label:'Y'},
+    {p:worldZ, col:'#378ADD', label:'Z'}
+  ];
+  wAxes.forEach(({p,col,label})=>{
+    ctx.beginPath(); ctx.moveTo(worldO[0],worldO[1]); ctx.lineTo(p[0],p[1]);
+    ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle=col; ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(label, p[0], p[1]-5);
+  });
+  ctx.beginPath(); ctx.arc(worldO[0],worldO[1],3,0,PI*2);
+  ctx.fillStyle=labelCol; ctx.fill();
+  ctx.fillStyle=labelCol; ctx.font='10px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('world', worldO[0]+5, worldO[1]+4);
+
+  const allTips = [];
+  Object.keys(FINGERS).forEach(fkey=>{
+    const f = FINGERS[fkey];
+    const data = computeTip(fkey);
+    const {pos, xAxis, yAxis, zAxis} = data;
+
+    const pO = project(pos, W, H, scale);
+    const pX = project(addV(pos, xAxis.map(v=>v*ALEN)), W, H, scale);
+    const pY = project(addV(pos, yAxis.map(v=>v*ALEN)), W, H, scale);
+    const pZ = project(addV(pos, zAxis.map(v=>v*ALEN)), W, H, scale);
+
+    const active = activeFingers.has(fkey);
+    allTips.push({fkey, f, pos, pO, pX, pY, pZ, active, depth: pO[2]});
+  });
+
+  allTips.sort((a,b)=>b.depth-a.depth);
+
+  allTips.forEach(({fkey, f, pos, pO, pX, pY, pZ, active})=>{
+    const alpha = active ? 1.0 : 0.15;
+
+    const drawBone = (from, to) => {
+      const pF = project(from, W, H, scale);
+      const pT = project(to, W, H, scale);
+      ctx.beginPath(); ctx.moveTo(pF[0],pF[1]); ctx.lineTo(pT[0],pT[1]);
+      ctx.strokeStyle = active ? f.color+'55' : f.color+'18';
+      ctx.lineWidth=1; ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    };
+
+    const prox_q = FINGERS[fkey].prox_q;
+    const Rp = qToMat(mulQ([1,0,0,0], prox_q));
+    const proxPos = addV([0,0,0], applyR(qToMat([1,0,0,0]), FINGERS[fkey].prox_pos));
+    drawBone([0,0,0], proxPos);
+    drawBone(proxPos, pos);
+
+    const axes = [
+      {end:pX, col:'#E24B4A', label:'X'},
+      {end:pY, col:'#639922', label:'Y'},
+      {end:pZ, col:'#378ADD', label:'Z'}
+    ];
+
+    axes.forEach(({end,col,label})=>{
+      ctx.globalAlpha=alpha;
+      ctx.beginPath(); ctx.moveTo(pO[0],pO[1]); ctx.lineTo(end[0],end[1]);
+      ctx.strokeStyle=col; ctx.lineWidth=2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(end[0],end[1],3,0,PI*2);
+      ctx.fillStyle=col; ctx.fill();
+      if(active){
+        ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
+        ctx.fillStyle=col;
+        ctx.fillText(label, end[0], end[1]-5);
+      }
+      ctx.globalAlpha=1;
+    });
+
+    ctx.globalAlpha=alpha;
+    ctx.beginPath(); ctx.arc(pO[0],pO[1],4,0,PI*2);
+    ctx.fillStyle=f.color; ctx.fill();
+    ctx.strokeStyle='white'; ctx.lineWidth=1; ctx.stroke();
+    ctx.globalAlpha=1;
+
+    if(active){
+      ctx.font='12px sans-serif'; ctx.textAlign='center';
+      ctx.fillStyle=f.color;
+      ctx.fillText(f.label, pO[0], pO[1]-12);
+
+      const px3 = pos.map(v=>(v*1000).toFixed(1));
+      ctx.font='10px sans-serif';
+      ctx.fillStyle=labelCol;
+      ctx.fillText(`(${px3[0]}, ${px3[1]}, ${px3[2]}) mm`, pO[0], pO[1]+16);
+    }
+  });
+
+  ctx.font='11px sans-serif'; ctx.fillStyle=dark?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.3)';
+  ctx.textAlign='center';
+  ctx.fillText('drag to rotate', W/2, H-8);
+}
+
+const fbtns = document.getElementById('fbtns');
+Object.keys(FINGERS).forEach(fkey=>{
+  const f=FINGERS[fkey];
+  const btn=document.createElement('button');
+  btn.className='fbtn active'; btn.textContent=f.label;
+  btn.style.borderColor=f.color;
+  btn.addEventListener('click',()=>{
+    if(activeFingers.has(fkey)) activeFingers.delete(fkey);
+    else activeFingers.add(fkey);
+    btn.classList.toggle('active', activeFingers.has(fkey));
+    draw();
+  });
+  fbtns.appendChild(btn);
+});
+
+const slidersEl = document.getElementById('sliders');
+Object.entries(JOINT_META).forEach(([k,meta])=>{
+  const div=document.createElement('div');
+  div.className='ctrl';
+  const lbl=document.createElement('label'); lbl.textContent=meta.label;
+  const sl=document.createElement('input'); sl.type='range';
+  sl.min=meta.min; sl.max=meta.max; sl.step=0.01; sl.value=meta.def;
+  const sp=document.createElement('span'); sp.textContent=meta.def.toFixed(2);
+  sl.addEventListener('input',()=>{
+    angles[k]=parseFloat(sl.value);
+    sp.textContent=parseFloat(sl.value).toFixed(2);
+    draw();
+  });
+  div.append(lbl,sl,sp);
+  slidersEl.appendChild(div);
+});
+
+window.addEventListener('resize', draw);
+draw();
+</script>
